@@ -19,6 +19,7 @@ namespace RoboNav
         public BigBitmapInfoHeader FileInfoHeader { get; private set; }
         private MemoryMappedViewAccessor Reader;
         private FileInfo MmfInfo;
+        public string FilePath { get; private set; }
         private int Padding;
         private long RowSize;
         private int MemoryMappedPosition;
@@ -29,15 +30,15 @@ namespace RoboNav
         private MemoryMappedFile Mmf;
 
 
-
         private BigBitmap()
         { }
 
-        private BigBitmap(MemoryMappedViewAccessor Accessor, BigBitmapHeader Header, BigBitmapInfoHeader Info)
+        private BigBitmap(MemoryMappedViewAccessor Accessor, BigBitmapHeader Header, BigBitmapInfoHeader Info, string filePath)
         {
             Reader = Accessor;
             FileHeader = Header;
             FileInfoHeader = Info;
+            FilePath = filePath;
             Initilize();
         }
 
@@ -45,8 +46,9 @@ namespace RoboNav
         {
             if (!File.Exists(filePath))
                 throw new Exception();
+            FilePath = filePath;
 
-            Mmf = MemoryMappedFile.CreateFromFile(filePath) ;
+            Mmf = MemoryMappedFile.CreateFromFile(filePath);
             MmfInfo = new FileInfo(filePath);
 
             if (MmfInfo.Length < VirtualSize)
@@ -71,6 +73,7 @@ namespace RoboNav
         {
             RowSize = (long)Math.Floor(((double)FileInfoHeader.BitsPerPixel * FileInfoHeader.BitmapWidth + 31) / 32) * 4;
             Padding = (int)(RowSize - FileInfoHeader.BitmapWidth * 3);
+            MmfInfo = new FileInfo(FilePath);
         }
 
         public unsafe byte[] ReadRawData(int LogicalOffset, int Length)
@@ -117,30 +120,7 @@ namespace RoboNav
             {
                 startByteIndex = 70 + (x * 3) + (i * RowSize) - 1;
 
-                if (Offset > startByteIndex)
-                {
-                    Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
-
-                    if (Offset + VirtualSize >= MmfInfo.Length)
-                        VirtualSize = MmfInfo.Length - Offset;
-                    else
-                        VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-
-                    Reader.Dispose();
-                    Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-
-
-                }
-                if (Offset + VirtualSize <= startByteIndex)
-                {
-                    Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
-                    if (Offset + VirtualSize >= MmfInfo.Length)
-                        VirtualSize = MmfInfo.Length - Offset;
-                    else
-                        VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-                    Reader.Dispose();
-                    Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-                }
+                SeektoPage(startByteIndex);
 
                 BytesRead = Reader.ReadArray<byte>(startByteIndex % MemoryPageSize,
                    rawData, 0, Data2Read);
@@ -200,7 +180,6 @@ namespace RoboNav
                     {
                         Chunk = Chunk.Concat(rawData);
                     }
-
             }
 
             var fileHeader = new BitmapHeader() { FileSize = Chunk.Count() + 54 };
@@ -218,18 +197,15 @@ namespace RoboNav
             HeaderData = HeaderData.Concat(fileInfoHeader.CreateInfoHeaderData(Chunk.Count())).ToArray();
             HeaderData = HeaderData.Concat(Chunk).ToArray();
 
-          //  File.WriteAllBytes("C:\\X\\FT1.bmp", HeaderData);
 
             using (var ms = new MemoryStream(HeaderData))
-            { CurrentChunk = new Bitmap(ms); CurrentChunk.Save("C:\\X\\ftt.bmp", ImageFormat.Bmp); }
+            { CurrentChunk = new Bitmap(ms); }
 
             return CurrentChunk;
         }
 
         public static BigBitmap CreateBigBitmap(string filePath, long Width, long Height)
-        {
-            return CreateBigBitmap(filePath, Width, Height, 197, 197, 0, 0, 0);
-        }
+        { return CreateBigBitmap(filePath, Width, Height, 197, 197, 0, 0, 0); }
 
         public static BigBitmap CreateBigBitmap(string filePath, long Width, long Height, int HorizantalRes, int VerticalRes, byte BackGround_Red, byte BackGround_Green, byte BackGround_Blue)
         {
@@ -242,39 +218,38 @@ namespace RoboNav
             BigBitmapHeader header = null;
             BigBitmapInfoHeader headerInfo = null;
 
-                using (var fileStream = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite))
+            using (var fileStream = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite))
+            {
+                header = new BigBitmapHeader() { FileSize = 70 + Height * ((Width * 3) + padding) };
+
+                var headerData = header.CreateBigBitmapHeader();
+                fileStream.Write(headerData, 0, headerData.Length);
+                fileStream.Flush();
+
+                headerInfo = new BigBitmapInfoHeader() { BitmapHeight = Height, BitsPerPixel = 24, ColorPlanes = 1, BitmapWidth = Width, HorizantalResolution = HorizantalRes, VerticalResolution = VerticalRes };
+
+                headerData = headerInfo.CreateInfoHeaderData(Height * ((Width * 3) + padding));
+                fileStream.Write(headerData, 0, headerData.Length);
+
+                var colorBytes = new byte[] { BackGround_Blue, BackGround_Green, BackGround_Red };
+                headerData = new byte[padding];
+
+                fileStream.Flush();
+
+                for (long i = 0; i < Height; i++)
                 {
-                    header = new BigBitmapHeader() { FileSize = 70 + Height * ((Width * 3) + padding) };
-
-                    var headerData = header.CreateBigBitmapHeader();
+                    for (long k = 0; k < Width; k++)
+                        fileStream.Write(colorBytes, 0, colorBytes.Length);
+                    //headerData = byte[padding]
                     fileStream.Write(headerData, 0, headerData.Length);
-                    fileStream.Flush();
-
-                    headerInfo = new BigBitmapInfoHeader() { BitmapHeight = Height, BitsPerPixel = 24, ColorPlanes = 1, BitmapWidth = Width, HorizantalResolution = HorizantalRes, VerticalResolution = VerticalRes };
-
-                    headerData = headerInfo.CreateInfoHeaderData(Height * ((Width * 3) + padding));
-                    fileStream.Write(headerData, 0, headerData.Length);
-
-                    var colorBytes = new byte[] { BackGround_Blue, BackGround_Green, BackGround_Red };
-                    headerData = new byte[padding];
-
-                    //   headerData = headerData.Concat(new byte[padding]).ToArray();
-                    fileStream.Flush();
-
-                    for (long i = 0; i < Height; i++)
-                    {
-                        for (long k = 0; k < Width; k++)
-                            fileStream.Write(colorBytes, 0, colorBytes.Length);
-                        //headerData = byte[padding]
-                        fileStream.Write(headerData, 0, headerData.Length);
-                    }
-
-                    fileStream.Flush();
-                    fileStream.Close();
                 }
-            
 
-            return new BigBitmap(MemoryMappedFile.CreateFromFile(filePath).CreateViewAccessor(), header, headerInfo);
+                fileStream.Flush();
+                fileStream.Close();
+            }
+
+
+            return new BigBitmap(MemoryMappedFile.CreateFromFile(filePath).CreateViewAccessor(), header, headerInfo, filePath);
         }
 
         public static BigBitmap CreateBigBitmap(string filePath, long Width, long Height, byte BackGround_Red, byte BackGround_Green, byte BackGround_Blue)
@@ -290,7 +265,8 @@ namespace RoboNav
         public static BigBitmap CreateBigBitmapFromBitmap(string filePath)
         {
             using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read))
-                return CreateBigBitmapFromBitmap(fileStream, filePath.Contains('.') ? filePath.Substring(0, (filePath.LastIndexOf('.'))) + ".bbmp" : filePath + ".bbmp");
+                return CreateBigBitmapFromBitmap(fileStream, filePath.Contains('.') ?
+                    filePath.Substring(0, (filePath.LastIndexOf('.'))) + ".bbmp" : filePath + ".bbmp");
         }
 
         public static BigBitmap CreateBigBitmapFromBitmap(Stream Stream, string BigBitmapFilePath)
@@ -300,8 +276,10 @@ namespace RoboNav
                 using (var BigBitmapFile = new FileStream(BigBitmapFilePath, FileMode.Create, FileAccess.ReadWrite))
                 {
                     byte[] data = new byte[40];
+
                     Stream.Read(data, 0, 18);
                     var header = BitmapHeader.GetHeader(data);
+
                     Stream.Read(data, 0, 36);
                     var infoHeader = BitmapInfoHeader.GetInfoHeader(data);
 
@@ -336,6 +314,7 @@ namespace RoboNav
 
                     BigBitmapFile.Flush();
                     BigBitmapFile.Close();
+
                     return new BigBitmap(BigBitmapFilePath);
                 }
             }
@@ -351,65 +330,74 @@ namespace RoboNav
         { DrawLine(new Point(Start_X, Start_Y), new Point(Destination_X, Destination_Y), LineColor, LineWidth); }
 
         public void DrawLine(Point Start, Point Destination, Color LineColor, int LineWidth)
+        { DrawLine(Start.X, Start.Y, Destination.X, Destination.Y, LineWidth, LineColor); }
+
+        public void DrawLine(long Start_X, long Start_Y, long Destination_X, long Destination_Y, int LineWidth, Color LineColor)
         {
-            if ((Start.X > FileInfoHeader.BitmapWidth || Start.X < 0) || (Start.Y > FileInfoHeader.BitmapHeight || Start.Y < 0))
+            if ((Start_X > FileInfoHeader.BitmapWidth || Start_X < 0) || (Start_Y > FileInfoHeader.BitmapHeight || Start_Y < 0))
                 throw new ArgumentOutOfRangeException("Start");
 
-            if ((Destination.X > FileInfoHeader.BitmapWidth || Destination.X < 0) || (Destination.Y > FileInfoHeader.BitmapHeight || Destination.Y < 0))
+            if ((Destination_X > FileInfoHeader.BitmapWidth || Destination_X < 0) || (Destination_Y > FileInfoHeader.BitmapHeight || Destination_Y < 0))
                 throw new ArgumentOutOfRangeException("Destination");
 
-            if (Start.X == Destination.X && Start.Y == Destination.Y)
-                SetPixel(Start, LineColor);
+            if (Start_X == Destination_X && Start_Y == Destination_Y)
+                SetPixel(Start_X, Start_Y, LineColor);
 
-            else if (Start.X == Destination.X) //Vertical Line
+            else if (Start_X == Destination_X) //Vertical Line
             {
-                long i = Start.Y > Destination.Y ? Start.Y : Destination.Y;
-                long j = Start.Y < Destination.Y ? Start.Y : Destination.Y;
+                long i = Start_Y > Destination_Y ? Start_Y : Destination_Y;
+                long j = Start_Y < Destination_Y ? Start_Y : Destination_Y;
                 j = FileInfoHeader.BitmapHeight - j;
 
+                long pos = -1;
                 for (long k = FileInfoHeader.BitmapHeight - i - 1; k < j; k++)
                 {
-                    Reader.Write(70 + k * RowSize + Start.X * 3, LineColor.B);
-                    Reader.Write(70 + k * RowSize + 1 + Start.X * 3, LineColor.G);
-                    Reader.Write(70 + k * RowSize + 2 + Start.X * 3, LineColor.R);
+                    pos = 70 + k * RowSize + Start_X * 3;
+
+                    SeektoPage(pos);
+                    Reader.Write(pos % MemoryPageSize, LineColor.B);
+
+                    SeektoPage(pos + 1);
+                    Reader.Write((pos + 1) % MemoryPageSize, LineColor.G);
+
+                    SeektoPage(pos + 1);
+                    Reader.Write((pos + 2) % MemoryPageSize, LineColor.R);
                 }
             }
-            else if (Start.Y == Destination.Y) // Horizantal Line
+            else if (Start_Y == Destination_Y) // Horizantal Line
             {
-                int i = Start.X < Destination.X ? Start.X : Destination.X;
-                int j = Start.X > Destination.X ? Start.X : Destination.X;
-                i *= 3;
-                j *= 3;
-                for (; i <= j; i += 3)
+                long i = Start_X < Destination_X ? Start_X : Destination_X;
+                long j = Start_X > Destination_X ? Start_X : Destination_X;
+                long pos = -1;
+
+                for (; i <= j; i++)
                 {
-                    Reader.Write(70 + i + ((FileInfoHeader.BitmapHeight - Start.Y - 1) * RowSize), LineColor.B);
-                    Reader.Write(70 + i + 1 + ((FileInfoHeader.BitmapHeight - Start.Y - 1) * RowSize), LineColor.G);
-                    Reader.Write(70 + i + 2 + ((FileInfoHeader.BitmapHeight - Start.Y - 1) * RowSize), LineColor.R);
+                    pos = 70 + i * 3 + ((FileInfoHeader.BitmapHeight - Start_Y - 1) * RowSize);
+
+                    SeektoPage(pos);
+                    Reader.Write(pos % MemoryPageSize, LineColor.B);
+
+                    SeektoPage(pos + 1);
+                    Reader.Write((pos + 1) % MemoryPageSize, LineColor.G);
+
+                    SeektoPage(pos + 2);
+                    Reader.Write((pos + 2) % MemoryPageSize, LineColor.R);
                 }
             }
             else // NONE
             {
-                var delta_X = Destination.X - Start.X;
-                var delta_Y = Destination.Y - Start.Y;
+                //Draw Line Using Bresenham Line algorithm
+                long dx = Math.Abs(Destination_X - Start_X), sx = Start_X < Destination_X ? 1 : -1;
+                long dy = Math.Abs(Destination_Y - Start_Y), sy = Start_Y < Destination_Y ? 1 : -1;
+                long err = (dx > dy ? dx : -dy) / 2, e2;
 
-                SetPixel(Start, LineColor);
-                SetPixel(Destination, LineColor);
-
-                var Slope = (double)delta_Y / delta_X;
-                var alpha = Math.Atan(Slope);
-                var lineLen = Math.Sqrt(Math.Pow(delta_X, 2) + Math.Pow(delta_Y, 2));
-
-                if (Start.X < Destination.X)
-                    for (int i = Start.X; i < Destination.X; i++)
-                    {
-                        SetPixel(i, ((int)(Slope * (i - Start.X)) + Start.Y), LineColor);
-                    }
-
-                if (Start.X > Destination.X)
-                    for (int i = Start.X; i > Destination.X; i--)
-                    {
-                        SetPixel(i, ((int)(Slope * (i - Start.X)) + Start.Y), LineColor);
-                    }
+                while (!(Start_X == Destination_X && Start_Y == Destination_Y))
+                {
+                    SetPixel(Start_X, Start_Y, LineColor);
+                    e2 = err;
+                    if (e2 > -dx) { err -= dy; Start_X += sx; }
+                    if (e2 < dy) { err += dx; Start_Y += sy; }
+                }
             }
         }
 
@@ -417,65 +405,27 @@ namespace RoboNav
         {
             var startByteIndex = 70 + RowSize * (FileInfoHeader.BitmapHeight - Position.Y - 1) + Position.X * 3;
 
-            if (Offset > startByteIndex)
-            {
-                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
-
-                if (Offset + VirtualSize >= MmfInfo.Length)
-                    VirtualSize = MmfInfo.Length - Offset;
-                else
-                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-
-                Reader.Dispose();
-                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-            }
-            if (Offset + VirtualSize <= startByteIndex)
-            {
-                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
-                if (Offset + VirtualSize >= MmfInfo.Length)
-                    VirtualSize = MmfInfo.Length - Offset;
-                else
-                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-                Reader.Dispose();
-                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-            }
-
+            SeektoPage(startByteIndex);
             Reader.Write(startByteIndex % MemoryPageSize, PixelColor.B);
+
+            SeektoPage(startByteIndex + 1);
             Reader.Write((startByteIndex + 1) % MemoryPageSize, PixelColor.G);
+
+            SeektoPage(startByteIndex + 2);
             Reader.Write((startByteIndex + 2) % MemoryPageSize, PixelColor.R);
         }
 
-        private void SetPixel(int X, int Y, Color PixelColor)
+        private void SetPixel(long X, long Y, Color PixelColor)
         {
             var startByteIndex = 70 + RowSize * (FileInfoHeader.BitmapHeight - Y - 1) + X * 3;
 
-            if (Offset > startByteIndex)
-            {
-                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
-
-                if (Offset + VirtualSize >= MmfInfo.Length)
-                    VirtualSize = MmfInfo.Length - Offset;
-                else
-                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-
-                Reader.Dispose();
-                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-            }
-            if (Offset + VirtualSize <= startByteIndex)
-            {
-                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
-
-                if (Offset + VirtualSize >= MmfInfo.Length)
-                    VirtualSize = MmfInfo.Length - Offset;
-                else
-                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-
-                Reader.Dispose();
-                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-            }
-
+            SeektoPage(startByteIndex);
             Reader.Write(startByteIndex % MemoryPageSize, PixelColor.B);
+
+            SeektoPage(startByteIndex + 1);
             Reader.Write((startByteIndex + 1) % MemoryPageSize, PixelColor.G);
+
+            SeektoPage(startByteIndex + 2);
             Reader.Write((startByteIndex + 2) % MemoryPageSize, PixelColor.R);
         }
 
@@ -497,24 +447,56 @@ namespace RoboNav
         }
 
         public void DrawCircle(Point Center, int Radius, Color Color, bool Fill)
+        { DrawCircle(Center.X, Center.Y, Radius, Color, Fill); }
+
+        public void DrawCircle(long Center_X, long Center_Y, long Radius, Color Color, bool Fill)
         {
-            int x = -1;
-            int y = -1;
+            //long x = -1;
+            //long y = -1;
 
-            for (double i = 0; i < 2 * Math.PI; i += 0.0075)
+            //for (double i = 0; i < 2 * Math.PI; i += 0.001)
+            //{
+            //    x = (long)(Math.Cos(i) * Radius) + Center_X;
+            //    y = (long)(Math.Sin(i) * Radius) + Center_Y;
+
+            //    if (x >= FileInfoHeader.BitmapWidth || x < 0 || y < 0 || y >= FileInfoHeader.BitmapHeight)
+            //        continue;
+
+            //    SetPixel(x, y, Color);
+
+            //    if (Fill)
+            //        DrawLine(Center_X, Center_Y, x, y, 1, Color);
+            //}
+
+            long d = (5 - Radius * 4) / 4;
+            long x = 0;
+            long y = Radius;
+
+            do
             {
-                x = (int)(Math.Cos(i) * Radius) + Center.X;
-                y = (int)(Math.Sin(i) * Radius) + Center.Y;
-
-                if (x >= FileInfoHeader.BitmapWidth || x < 0 || y < 0 || y >= FileInfoHeader.BitmapHeight)
-                    continue;
-
-                SetPixel(x, y, Color);
-            }
+                if (Center_X + x >= 0 && Center_X + x <= FileInfoHeader.BitmapWidth - 1 && Center_Y + y >= 0 && Center_Y + y <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X + x, Center_Y + y, Color);
+                if (Center_X + x >= 0 && Center_X + x <= FileInfoHeader.BitmapWidth - 1 && Center_Y - y >= 0 && Center_Y - y <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X + x, Center_Y - y, Color);
+                if (Center_X - x >= 0 && Center_X - x <= FileInfoHeader.BitmapWidth - 1 && Center_Y + y >= 0 && Center_Y + y <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X - x, Center_Y + y, Color);
+                if (Center_X - x >= 0 && Center_X - x <= FileInfoHeader.BitmapWidth - 1 && Center_Y - y >= 0 && Center_Y - y <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X - x, Center_Y - y, Color);
+                if (Center_X + y >= 0 && Center_X + y <= FileInfoHeader.BitmapWidth - 1 && Center_Y + x >= 0 && Center_Y + x <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X + y, Center_Y + x, Color);
+                if (Center_X + y >= 0 && Center_X + y <= FileInfoHeader.BitmapWidth - 1 && Center_Y - x >= 0 && Center_Y - x <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X + y, Center_Y - x, Color);
+                if (Center_X - y >= 0 && Center_X - y <= FileInfoHeader.BitmapWidth - 1 && Center_Y + x >= 0 && Center_Y + x <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X - y, Center_Y + x, Color);
+                if (Center_X - y >= 0 && Center_X - y <= FileInfoHeader.BitmapWidth - 1 && Center_Y - x >= 0 && Center_Y - x <= FileInfoHeader.BitmapHeight - 1) SetPixel(Center_X - y, Center_Y - x, Color);
+                if (d < 0)
+                {
+                    d += 2 * x + 1;
+                }
+                else
+                {
+                    d += 2 * (x - y) + 1;
+                    y--;
+                }
+                x++;
+            } while (x <= y);
 
             if (Fill)
                 for (int i = 0; i < Radius; i++)
-                    DrawCircle(Center, i, Color, false);
+                    DrawCircle(Center_X, Center_Y, i, Color, false);
         }
 
         public Bitmap ConvertToBitmap()
@@ -528,20 +510,31 @@ namespace RoboNav
             Bitmap map = null;
 
             using (var ms = new MemoryStream())
-            using (var writer = new StreamWriter(ms))
             {
                 var header = new BitmapHeader();
-                header.FileSize = (int)FileHeader.FileSize;
+                header.FileSize = (int)FileHeader.FileSize - 16;
 
                 var headerInfo = new BitmapInfoHeader();
                 headerInfo.BitmapHeight = (int)FileInfoHeader.BitmapHeight;
                 headerInfo.BitmapWidth = (int)FileInfoHeader.BitmapWidth;
 
-                writer.Write(header.CreateBitmapHeader());
-                writer.Write(headerInfo.CreateInfoHeaderData((int)FileInfoHeader.ColorDataSize));
-                for (int i = 0; i < headerInfo.ColorDataSize; i++)
-                    writer.Write(Reader.ReadByte(i + 70));
+                headerInfo.BitsPerPixel = FileInfoHeader.BitsPerPixel;
+                headerInfo.ColorPlanes = FileInfoHeader.ColorPlanes;
+                headerInfo.HorizantalResolution = FileInfoHeader.HorizantalResolution;
+                headerInfo.VerticalResolution = FileInfoHeader.VerticalResolution;
 
+                var data = header.CreateBitmapHeader();
+                ms.Write(data, 0, data.Length);
+
+                data = headerInfo.CreateInfoHeaderData((int)FileInfoHeader.ColorDataSize);
+                ms.Write(data, 0, data.Length);
+                data = null;
+
+                for (int i = 0; i < header.FileSize - 54; i++) // 54 = 70 - 16 
+                {
+                    SeektoPage(i + 70);
+                    ms.WriteByte(Reader.ReadByte(((i + 70) % MemoryPageSize)));
+                }
                 map = new Bitmap(ms);
             }
 
@@ -577,31 +570,7 @@ namespace RoboNav
 
                 for (int i = 0; i < header.FileSize - 54; i++) // 54 = 70 - 16 
                 {
-                    if (Offset > i + 70)
-                    {
-                        Offset = ((i + 70) / MemoryPageSize) * MemoryPageSize;
-
-                        if (Offset + VirtualSize >= MmfInfo.Length)
-                            VirtualSize = MmfInfo.Length - Offset;
-                        else
-                            VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-
-                        Reader.Dispose();
-                        Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-                    }
-
-                    if (Offset + VirtualSize <= i + 70)
-                    {
-                        Offset = ((i + 70) / MemoryPageSize) * MemoryPageSize;
-
-                        if (Offset + VirtualSize >= MmfInfo.Length)
-                            VirtualSize = MmfInfo.Length - Offset;
-                        else
-                            VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
-
-                        Reader.Dispose();
-                        Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-                    }
+                    SeektoPage(i + 70);
                     file.WriteByte(Reader.ReadByte(((i + 70) % MemoryPageSize)));
                 }
 
@@ -618,11 +587,13 @@ namespace RoboNav
                 throw new ArgumentOutOfRangeException("Y");
 
             var position = (FileInfoHeader.BitmapHeight - Y - 1) * RowSize + X * 3 + 70;
+
             SeektoPage(position);
-            
             var B = Reader.ReadByte(position % MemoryPageSize);
+
             SeektoPage(position + 1);
-            var G = Reader.ReadByte((position+1) % MemoryPageSize);
+            var G = Reader.ReadByte((position + 1) % MemoryPageSize);
+
             SeektoPage(position + 2);
             var R = Reader.ReadByte((position + 2) % MemoryPageSize);
 
