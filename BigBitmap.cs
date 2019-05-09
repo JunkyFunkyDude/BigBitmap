@@ -18,11 +18,13 @@ namespace RoboNav
         public BigBitmapHeader FileHeader { get; private set; }
         public BigBitmapInfoHeader FileInfoHeader { get; private set; }
         private MemoryMappedViewAccessor Reader;
+        private FileInfo MmfInfo;
         private int Padding;
         private long RowSize;
         private int MemoryMappedPosition;
         private const int MemoryPageSize = 65536;
-        private long VirtualSize = 32 * MemoryPageSize; // must be a multiple of 65536
+        private const int MemoryPagesForVirutalMemoryBuffer = 1;
+        private long VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize; // must be a multiple of 65536
         private long Offset = 0;
         private MemoryMappedFile Mmf;
 
@@ -41,10 +43,19 @@ namespace RoboNav
 
         public BigBitmap(string filePath)
         {
-            Mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.OpenOrCreate, "any", 0);
+            if (!File.Exists(filePath))
+                throw new Exception();
 
+            Mmf = MemoryMappedFile.CreateFromFile(filePath) ;
+            MmfInfo = new FileInfo(filePath);
+
+            if (MmfInfo.Length < VirtualSize)
+                VirtualSize = MmfInfo.Length;
+
+
+            // File.SetAttributes(filePath, FileAttributes.Normal);
             Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
-          
+
             if (!Reader.CanRead)
                 throw new InvalidOperationException("File cannot be read");
 
@@ -76,7 +87,7 @@ namespace RoboNav
         {
             byte[] arr = new byte[Length];
             byte* ptr = (byte*)0;
-            var off = (int)((Offset + MemoryMappedPosition)%MemoryPageSize);
+            var off = (int)((Offset) /*% MemoryPageSize*/);
             this.Reader.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
             Marshal.Copy(IntPtr.Add(new IntPtr(ptr), off), arr, 0, (int)Length);
             this.Reader.SafeMemoryMappedViewHandle.ReleasePointer();
@@ -85,47 +96,132 @@ namespace RoboNav
 
         public Bitmap GetChunk(long width, long height, long x, long y)
         {
-            if (width * height * 3 > int.MaxValue)
-                throw new InvalidOperationException("Too big Chunk Size");
-            
+            if (width * height * 3 >= int.MaxValue)
+                throw new InvalidOperationException("Chunk Size is too big");
+
             if (width + x > FileInfoHeader.BitmapWidth)
                 width = FileInfoHeader.BitmapWidth - x;
             if (height + y > FileInfoHeader.BitmapHeight)
                 height = FileInfoHeader.BitmapHeight;
-            byte[] Chunk = null;
+
+            var newRowSize = (int)Math.Floor(((double)FileInfoHeader.BitsPerPixel * width + 31) / 32) * 4;
+            var newPadding = (newRowSize - width * 3);
+            var Data2Read = (int)(newRowSize - newPadding);
+
+            IEnumerable<byte> Chunk = null;
+            byte[] rawData = new byte[Data2Read];
+            long startByteIndex = -1;
+            int BytesRead = -1;
 
             for (long i = FileInfoHeader.BitmapHeight - (y + height); i < (FileInfoHeader.BitmapHeight - y); i++)
             {
-                var rawData = ReadRawDataByRealOffset(70 + x + i * RowSize , width * 3);
-               
-                if (rawData.Length % 4 != 0)
+                startByteIndex = 70 + (x * 3) + (i * RowSize) - 1;
+
+                if (Offset > startByteIndex)
                 {
-                    rawData = rawData.Concat(new byte[rawData.Length % 4]).ToArray();
+                    Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+
+                    if (Offset + VirtualSize >= MmfInfo.Length)
+                        VirtualSize = MmfInfo.Length - Offset;
+                    else
+                        VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                    Reader.Dispose();
+                    Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+
+
+                }
+                if (Offset + VirtualSize <= startByteIndex)
+                {
+                    Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+                    if (Offset + VirtualSize >= MmfInfo.Length)
+                        VirtualSize = MmfInfo.Length - Offset;
+                    else
+                        VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+                    Reader.Dispose();
+                    Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
                 }
 
+                BytesRead = Reader.ReadArray<byte>(startByteIndex % MemoryPageSize,
+                   rawData, 0, Data2Read);
+
+                if (newPadding != 0)
+                    rawData = rawData.Concat(new byte[newPadding]).ToArray();
+
+
                 if (Chunk == null)
-                    Chunk = rawData;
+                    if (BytesRead != Data2Read)
+                    {
+                        Chunk = rawData.SubArray(0, BytesRead);
+                        Offset += BytesRead;
+
+                        if (Offset + VirtualSize >= MmfInfo.Length)
+                            VirtualSize = MmfInfo.Length - Offset;
+                        else
+                            VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                        Reader.Dispose();
+                        Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+
+                        BytesRead += Reader.ReadArray<byte>(Offset % MemoryPageSize, rawData, BytesRead, rawData.Length - BytesRead);
+                        if (BytesRead != RowSize)
+                        {
+                            Chunk = Chunk.Concat(rawData.SubArray(0, BytesRead));
+                        }
+                        else
+                        { Chunk = Chunk.Concat(rawData); }
+                    }
+                    else
+                    { Chunk = rawData; }
+
                 else
-                    Chunk = Chunk.Concat(rawData).ToArray();
+                    if (BytesRead != Data2Read)
+                    {
+                        Chunk = Chunk.Concat(rawData.SubArray(0, BytesRead));
+                        Offset += BytesRead;
+
+                        if (Offset + VirtualSize >= MmfInfo.Length)
+                            VirtualSize = MmfInfo.Length - Offset;
+                        else
+                            VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                        Reader.Dispose();
+                        Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+
+                        BytesRead += Reader.ReadArray<byte>(Offset % MemoryPageSize, rawData, BytesRead, rawData.Length - BytesRead);
+                        if (BytesRead != RowSize)
+                        {
+                            Chunk = Chunk.Concat(rawData.SubArray(0, BytesRead));
+                        }
+                        else
+                        { Chunk = Chunk.Concat(rawData); }
+                    }
+                    else
+                    {
+                        Chunk = Chunk.Concat(rawData);
+                    }
+
             }
 
-            var fileHeader = new BitmapHeader() { FileSize = Chunk.Length + 54 };
+            var fileHeader = new BitmapHeader() { FileSize = Chunk.Count() + 54 };
             var fileInfoHeader = new BitmapInfoHeader()
             {
                 BitmapHeight = (int)height,
                 BitmapWidth = (int)width,
-                BitsPerPixel = 24,
-                ColorPlanes = 1,
-                HorizantalResolution = 197,
-                VerticalResolution = 197
+                BitsPerPixel = FileInfoHeader.BitsPerPixel,
+                ColorPlanes = FileInfoHeader.ColorPlanes,
+                HorizantalResolution = FileInfoHeader.HorizantalResolution,
+                VerticalResolution = FileInfoHeader.VerticalResolution
             };
 
             var HeaderData = fileHeader.CreateBitmapHeader();
-            HeaderData = HeaderData.Concat(fileInfoHeader.CreateInfoHeaderData(Chunk.Length)).Concat(Chunk).ToArray();
-             File.WriteAllBytes("C:\\X\\FT1.bmp", HeaderData);
+            HeaderData = HeaderData.Concat(fileInfoHeader.CreateInfoHeaderData(Chunk.Count())).ToArray();
+            HeaderData = HeaderData.Concat(Chunk).ToArray();
+
+          //  File.WriteAllBytes("C:\\X\\FT1.bmp", HeaderData);
 
             using (var ms = new MemoryStream(HeaderData))
-                CurrentChunk = new Bitmap(ms);
+            { CurrentChunk = new Bitmap(ms); CurrentChunk.Save("C:\\X\\ftt.bmp", ImageFormat.Bmp); }
 
             return CurrentChunk;
         }
@@ -145,9 +241,8 @@ namespace RoboNav
 
             BigBitmapHeader header = null;
             BigBitmapInfoHeader headerInfo = null;
-            Task.Factory.StartNew(new Action(() =>
-            {
-                using (var fileStream = new FileStream(filePath, FileMode.Create))
+
+                using (var fileStream = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite))
                 {
                     header = new BigBitmapHeader() { FileSize = 70 + Height * ((Width * 3) + padding) };
 
@@ -169,20 +264,15 @@ namespace RoboNav
                     for (long i = 0; i < Height; i++)
                     {
                         for (long k = 0; k < Width; k++)
-                        {
                             fileStream.Write(colorBytes, 0, colorBytes.Length);
-                            // if (k % 1000 == 0)
-                            // fileStream.Flush();
-                        }
+                        //headerData = byte[padding]
                         fileStream.Write(headerData, 0, headerData.Length);
-                        //fileStream.Write(headerData, 0, headerData.Length);
-
                     }
 
                     fileStream.Flush();
                     fileStream.Close();
                 }
-            })).Wait();
+            
 
             return new BigBitmap(MemoryMappedFile.CreateFromFile(filePath).CreateViewAccessor(), header, headerInfo);
         }
@@ -246,7 +336,6 @@ namespace RoboNav
 
                     BigBitmapFile.Flush();
                     BigBitmapFile.Close();
-                    //BigBitmapFile.Dispose();
                     return new BigBitmap(BigBitmapFilePath);
                 }
             }
@@ -327,49 +416,67 @@ namespace RoboNav
         public void SetPixel(Point Position, Color PixelColor)
         {
             var startByteIndex = 70 + RowSize * (FileInfoHeader.BitmapHeight - Position.Y - 1) + Position.X * 3;
+
             if (Offset > startByteIndex)
             {
                 Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+
+                if (Offset + VirtualSize >= MmfInfo.Length)
+                    VirtualSize = MmfInfo.Length - Offset;
+                else
+                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
                 Reader.Dispose();
                 Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
             }
-            if (Offset + VirtualSize < startByteIndex)
+            if (Offset + VirtualSize <= startByteIndex)
             {
                 Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+                if (Offset + VirtualSize >= MmfInfo.Length)
+                    VirtualSize = MmfInfo.Length - Offset;
+                else
+                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
                 Reader.Dispose();
                 Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
             }
 
-            startByteIndex = startByteIndex % MemoryPageSize;
-
-            Reader.Write(startByteIndex, PixelColor.B);
-            Reader.Write(startByteIndex + 1, PixelColor.G);
-            Reader.Write(startByteIndex + 2, PixelColor.R);
+            Reader.Write(startByteIndex % MemoryPageSize, PixelColor.B);
+            Reader.Write((startByteIndex + 1) % MemoryPageSize, PixelColor.G);
+            Reader.Write((startByteIndex + 2) % MemoryPageSize, PixelColor.R);
         }
 
         private void SetPixel(int X, int Y, Color PixelColor)
         {
             var startByteIndex = 70 + RowSize * (FileInfoHeader.BitmapHeight - Y - 1) + X * 3;
-           
-            //var offsetChanged = false;
+
             if (Offset > startByteIndex)
             {
-                Offset =  (startByteIndex / MemoryPageSize)*MemoryPageSize;
+                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+
+                if (Offset + VirtualSize >= MmfInfo.Length)
+                    VirtualSize = MmfInfo.Length - Offset;
+                else
+                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
                 Reader.Dispose();
                 Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
             }
-            if (Offset + VirtualSize < startByteIndex)
+            if (Offset + VirtualSize <= startByteIndex)
             {
                 Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+
+                if (Offset + VirtualSize >= MmfInfo.Length)
+                    VirtualSize = MmfInfo.Length - Offset;
+                else
+                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
                 Reader.Dispose();
                 Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
             }
-           
-            startByteIndex = startByteIndex % MemoryPageSize;
 
-            Reader.Write(startByteIndex, PixelColor.B);
-            Reader.Write(startByteIndex + 1, PixelColor.G);
-            Reader.Write(startByteIndex + 2, PixelColor.R);
+            Reader.Write(startByteIndex % MemoryPageSize, PixelColor.B);
+            Reader.Write((startByteIndex + 1) % MemoryPageSize, PixelColor.G);
+            Reader.Write((startByteIndex + 2) % MemoryPageSize, PixelColor.R);
         }
 
         public void DrawRectangle(Point A, Point B, Color Color, bool Fill)
@@ -394,10 +501,11 @@ namespace RoboNav
             int x = -1;
             int y = -1;
 
-            for (double i = 0; i < 2 * Math.PI; i += 0.05)
+            for (double i = 0; i < 2 * Math.PI; i += 0.0075)
             {
                 x = (int)(Math.Cos(i) * Radius) + Center.X;
                 y = (int)(Math.Sin(i) * Radius) + Center.Y;
+
                 if (x >= FileInfoHeader.BitmapWidth || x < 0 || y < 0 || y >= FileInfoHeader.BitmapHeight)
                     continue;
 
@@ -407,8 +515,6 @@ namespace RoboNav
             if (Fill)
                 for (int i = 0; i < Radius; i++)
                     DrawCircle(Center, i, Color, false);
-
-
         }
 
         public Bitmap ConvertToBitmap()
@@ -430,7 +536,6 @@ namespace RoboNav
                 var headerInfo = new BitmapInfoHeader();
                 headerInfo.BitmapHeight = (int)FileInfoHeader.BitmapHeight;
                 headerInfo.BitmapWidth = (int)FileInfoHeader.BitmapWidth;
-                //headerInfo.ColorDataSize = (int)FileInfoHeader.ColorDataSize;
 
                 writer.Write(header.CreateBitmapHeader());
                 writer.Write(headerInfo.CreateInfoHeaderData((int)FileInfoHeader.ColorDataSize));
@@ -451,7 +556,7 @@ namespace RoboNav
                     throw new InvalidOperationException("File Size is too big, Try using \"Chunk\" method to get smaller Picture Size");
 
                 if (FileInfoHeader.BitmapHeight > int.MaxValue || FileInfoHeader.BitmapWidth > int.MaxValue || FileInfoHeader.ColorDataSize > int.MaxValue)
-                    throw new InvalidOperationException("Color Data (Height or Width) is(are) too high, Cant fit one (or more) in \"Int\" DataType");
+                    throw new InvalidOperationException("Color Data (Height or Width) is(are) too high, Cant fit one field (or more) in \"Int\" DataType");
 
                 var header = new BitmapHeader();
                 header.FileSize = (int)FileHeader.FileSize - 16; // 70-54=16 is difference between our new "bigbitmap" header and original bitmapheader
@@ -470,11 +575,88 @@ namespace RoboNav
                 data = headerInfo.CreateInfoHeaderData((int)FileInfoHeader.ColorDataSize);
                 file.Write(data, 0, data.Length);
 
-                for (int i = 0; i < header.FileSize - 38; i++) // no idea where 38 came from (possibly from 54-16=38 but idk why ?!)
-                    file.WriteByte(Reader.ReadByte(i + 70));
+                for (int i = 0; i < header.FileSize - 54; i++) // 54 = 70 - 16 
+                {
+                    if (Offset > i + 70)
+                    {
+                        Offset = ((i + 70) / MemoryPageSize) * MemoryPageSize;
+
+                        if (Offset + VirtualSize >= MmfInfo.Length)
+                            VirtualSize = MmfInfo.Length - Offset;
+                        else
+                            VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                        Reader.Dispose();
+                        Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+                    }
+
+                    if (Offset + VirtualSize <= i + 70)
+                    {
+                        Offset = ((i + 70) / MemoryPageSize) * MemoryPageSize;
+
+                        if (Offset + VirtualSize >= MmfInfo.Length)
+                            VirtualSize = MmfInfo.Length - Offset;
+                        else
+                            VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                        Reader.Dispose();
+                        Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+                    }
+                    file.WriteByte(Reader.ReadByte(((i + 70) % MemoryPageSize)));
+                }
 
                 file.Flush();
                 file.Close();
+            }
+        }
+
+        public Color GetPixel(long X, long Y)
+        {
+            if (X > FileInfoHeader.BitmapWidth || X < 0)
+                throw new ArgumentOutOfRangeException("X");
+            if (Y > FileInfoHeader.BitmapHeight || Y < 0)
+                throw new ArgumentOutOfRangeException("Y");
+
+            var position = (FileInfoHeader.BitmapHeight - Y - 1) * RowSize + X * 3 + 70;
+            SeektoPage(position);
+            
+            var B = Reader.ReadByte(position % MemoryPageSize);
+            SeektoPage(position + 1);
+            var G = Reader.ReadByte((position+1) % MemoryPageSize);
+            SeektoPage(position + 2);
+            var R = Reader.ReadByte((position + 2) % MemoryPageSize);
+
+            return Color.FromArgb(R, G, B);
+        }
+
+        public Color GetPixel(Point Coordinates)
+        { return GetPixel(Coordinates.X, Coordinates.Y); }
+
+        private void SeektoPage(long Index)
+        {
+            if (Offset > Index)
+            {
+                Offset = (Index / MemoryPageSize) * MemoryPageSize;
+
+                if (Offset + VirtualSize >= MmfInfo.Length)
+                    VirtualSize = MmfInfo.Length - Offset;
+                else
+                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                Reader.Dispose();
+                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+            }
+            if (Offset + VirtualSize <= Index)
+            {
+                Offset = (Index / MemoryPageSize) * MemoryPageSize;
+
+                if (Offset + VirtualSize >= MmfInfo.Length)
+                    VirtualSize = MmfInfo.Length - Offset;
+                else
+                    VirtualSize = MemoryPagesForVirutalMemoryBuffer * MemoryPageSize;
+
+                Reader.Dispose();
+                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
             }
         }
     }
