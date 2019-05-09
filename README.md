@@ -16,6 +16,6 @@ since its a custom image format, there is no Graphic support (sry about that) bu
 
 GetChunk(..) function DOES NOT WORK !
 
-Trying to save(to bitmap format) or converting to bitmap with resolutions more than 2 MemoryPage(>2* 2^16) will result in a corrupted file/format
+Trying to save(to bitmap format) or converting to bitmap with any dimensions more than 2 MemoryPage(~131000 pixel each) will result in a corrupted file/format
 
 
