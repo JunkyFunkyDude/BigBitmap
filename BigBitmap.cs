@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -8,6 +8,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace RoboNav
 {
@@ -20,6 +21,11 @@ namespace RoboNav
         private int Padding;
         private long RowSize;
         private int MemoryMappedPosition;
+        private const int MemoryPageSize = 65536;
+        private long VirtualSize = 32 * MemoryPageSize; // must be a multiple of 65536
+        private long Offset = 0;
+        private MemoryMappedFile Mmf;
+
 
 
         private BigBitmap()
@@ -35,15 +41,10 @@ namespace RoboNav
 
         public BigBitmap(string filePath)
         {
-            var mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.OpenOrCreate, "any", 0);
-            Reader = mmf.CreateViewAccessor();
+            Mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.OpenOrCreate, "any", 0);
 
-            var mmf2 = MemoryMappedFile.CreateFromFile(filePath + "1", FileMode.OpenOrCreate, "any1", (int)Math.Pow(2, 30));
-            var Reader2 = mmf2.CreateViewAccessor();
-
-
-
-
+            Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+          
             if (!Reader.CanRead)
                 throw new InvalidOperationException("File cannot be read");
 
@@ -75,14 +76,18 @@ namespace RoboNav
         {
             byte[] arr = new byte[Length];
             byte* ptr = (byte*)0;
+            var off = (int)((Offset + MemoryMappedPosition)%MemoryPageSize);
             this.Reader.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
-            Marshal.Copy(IntPtr.Add(new IntPtr(ptr), (int)(Offset + MemoryMappedPosition)), arr, 0, (int)Length);
+            Marshal.Copy(IntPtr.Add(new IntPtr(ptr), off), arr, 0, (int)Length);
             this.Reader.SafeMemoryMappedViewHandle.ReleasePointer();
             return arr;
         }
 
         public Bitmap GetChunk(long width, long height, long x, long y)
         {
+            if (width * height * 3 > int.MaxValue)
+                throw new InvalidOperationException("Too big Chunk Size");
+            
             if (width + x > FileInfoHeader.BitmapWidth)
                 width = FileInfoHeader.BitmapWidth - x;
             if (height + y > FileInfoHeader.BitmapHeight)
@@ -91,7 +96,8 @@ namespace RoboNav
 
             for (long i = FileInfoHeader.BitmapHeight - (y + height); i < (FileInfoHeader.BitmapHeight - y); i++)
             {
-                var rawData = ReadRawDataByRealOffset(70 + x + i * RowSize - 1, width * 3);
+                var rawData = ReadRawDataByRealOffset(70 + x + i * RowSize , width * 3);
+               
                 if (rawData.Length % 4 != 0)
                 {
                     rawData = rawData.Concat(new byte[rawData.Length % 4]).ToArray();
@@ -103,20 +109,20 @@ namespace RoboNav
                     Chunk = Chunk.Concat(rawData).ToArray();
             }
 
-            var fileHeader = new BigBitmapHeader() { FileSize = Chunk.Length + 70 };
-            var fileInfoHeader = new BigBitmapInfoHeader()
+            var fileHeader = new BitmapHeader() { FileSize = Chunk.Length + 54 };
+            var fileInfoHeader = new BitmapInfoHeader()
             {
-                BitmapHeight = height,
-                BitmapWidth = width,
+                BitmapHeight = (int)height,
+                BitmapWidth = (int)width,
                 BitsPerPixel = 24,
                 ColorPlanes = 1,
                 HorizantalResolution = 197,
                 VerticalResolution = 197
             };
 
-            var HeaderData = fileHeader.CreateBigBitmapHeader();
+            var HeaderData = fileHeader.CreateBitmapHeader();
             HeaderData = HeaderData.Concat(fileInfoHeader.CreateInfoHeaderData(Chunk.Length)).Concat(Chunk).ToArray();
-            // File.WriteAllBytes("C:\\X\\FT.bmp", HeaderData);
+             File.WriteAllBytes("C:\\X\\FT1.bmp", HeaderData);
 
             using (var ms = new MemoryStream(HeaderData))
                 CurrentChunk = new Bitmap(ms);
@@ -320,16 +326,50 @@ namespace RoboNav
 
         public void SetPixel(Point Position, Color PixelColor)
         {
-            Reader.Write(70 + RowSize * (FileInfoHeader.BitmapHeight - Position.Y - 1) + Position.X * 3, PixelColor.B);
-            Reader.Write(70 + 1 + RowSize * (FileInfoHeader.BitmapHeight - Position.Y - 1) + Position.X * 3, PixelColor.G);
-            Reader.Write(70 + 2 + RowSize * (FileInfoHeader.BitmapHeight - Position.Y - 1) + Position.X * 3, PixelColor.R);
+            var startByteIndex = 70 + RowSize * (FileInfoHeader.BitmapHeight - Position.Y - 1) + Position.X * 3;
+            if (Offset > startByteIndex)
+            {
+                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+                Reader.Dispose();
+                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+            }
+            if (Offset + VirtualSize < startByteIndex)
+            {
+                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+                Reader.Dispose();
+                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+            }
+
+            startByteIndex = startByteIndex % MemoryPageSize;
+
+            Reader.Write(startByteIndex, PixelColor.B);
+            Reader.Write(startByteIndex + 1, PixelColor.G);
+            Reader.Write(startByteIndex + 2, PixelColor.R);
         }
 
         private void SetPixel(int X, int Y, Color PixelColor)
         {
-            Reader.Write(70 + RowSize * (FileInfoHeader.BitmapHeight - Y - 1) + X * 3, PixelColor.B);
-            Reader.Write(70 + 1 + RowSize * (FileInfoHeader.BitmapHeight - Y - 1) + X * 3, PixelColor.G);
-            Reader.Write(70 + 2 + RowSize * (FileInfoHeader.BitmapHeight - Y - 1) + X * 3, PixelColor.R);
+            var startByteIndex = 70 + RowSize * (FileInfoHeader.BitmapHeight - Y - 1) + X * 3;
+           
+            //var offsetChanged = false;
+            if (Offset > startByteIndex)
+            {
+                Offset =  (startByteIndex / MemoryPageSize)*MemoryPageSize;
+                Reader.Dispose();
+                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+            }
+            if (Offset + VirtualSize < startByteIndex)
+            {
+                Offset = (startByteIndex / MemoryPageSize) * MemoryPageSize;
+                Reader.Dispose();
+                Reader = Mmf.CreateViewAccessor(Offset, VirtualSize);
+            }
+           
+            startByteIndex = startByteIndex % MemoryPageSize;
+
+            Reader.Write(startByteIndex, PixelColor.B);
+            Reader.Write(startByteIndex + 1, PixelColor.G);
+            Reader.Write(startByteIndex + 2, PixelColor.R);
         }
 
         public void DrawRectangle(Point A, Point B, Color Color, bool Fill)
